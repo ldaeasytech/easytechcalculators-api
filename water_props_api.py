@@ -1,20 +1,34 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import CoolProp.CoolProp as CP
-from scipy.optimize import brentq, fsolve
+from scipy.optimize import brentq
 
 FLUID = "Water"
 
 app = FastAPI(
     title="EasyTechCalculators – Water Properties API",
-    description="Engineering-grade thermodynamic properties of water (ice, liquid, vapor)",
+    description="Engineering-grade thermodynamic properties of water"
 )
 
-# =========================================================
-# Models
-# =========================================================
+# =========================
+# CORS (REQUIRED)
+# =========================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://easytechcalculators.com",
+        "https://www.easytechcalculators.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# =========================
+# MODELS
+# =========================
 class StateRequest(BaseModel):
     input1_name: str
     input1_value: float
@@ -27,7 +41,6 @@ class StateResponse(BaseModel):
     phase: str
     quality: Optional[float]
     density: float
-    specific_volume: float
     cp: float
     cv: float
     entropy: float
@@ -35,12 +48,10 @@ class StateResponse(BaseModel):
     conductivity: float
     viscosity: Optional[float]
 
-# =========================================================
-# Helpers
-# =========================================================
-
+# =========================
+# HELPERS
+# =========================
 def melting_temperature(P):
-    """Melting temperature of ice-water at pressure P"""
     try:
         return CP.PropsSI("T", "P", P, "phase", "solid", FLUID)
     except:
@@ -59,149 +70,96 @@ def detect_phase_PT(P, T):
     else:
         return "subcooled_liquid"
 
-def prop(name, P, T):
-    return CP.PropsSI(name, "P", P, "T", T, FLUID)
+def sat_T_from_P(P):
+    return CP.PropsSI("T", "P", P, "Q", 0, FLUID)
 
-# =========================================================
-# Solver Implementations
-# =========================================================
+# =========================
+# SOLVER DISPATCHER
+# =========================
+def solve_state(i1, v1, i2, v2):
+    inputs = {i1: v1, i2: v2}
 
-def solve_PT(v1, v2):
-    return (v1, v2)
+    try:
+        # T + P
+        if "T" in inputs and "P" in inputs:
+            T, P = inputs["T"], inputs["P"]
 
-def solve_Px(v1, v2):
-    P = v1 if v1 > 1 else v2
-    x = v2 if P == v1 else v1
+        # P + x
+        elif "P" in inputs and "X" in inputs:
+            P = inputs["P"]
+            x = inputs["X"]
+            T = CP.PropsSI("T", "P", P, "Q", x, FLUID)
 
-    if not (0 <= x <= 1):
-        raise HTTPException(400, "Quality must be between 0 and 1")
+        # T + x
+        elif "T" in inputs and "X" in inputs:
+            T = inputs["T"]
+            x = inputs["X"]
+            P = CP.PropsSI("P", "T", T, "Q", x, FLUID)
 
-    T = CP.PropsSI("T", "P", P, "Q", x, FLUID)
-    return P, T, x
+        # P + h
+        elif "P" in inputs and "H" in inputs:
+            P, h = inputs["P"], inputs["H"]
+            T = brentq(
+                lambda T_: CP.PropsSI("H", "P", P, "T", T_, FLUID) - h,
+                250, 2000
+            )
 
-def solve_Tx(v1, v2):
-    T = v1 if v1 > 200 else v2
-    x = v2 if T == v1 else v1
+        # P + s
+        elif "P" in inputs and "S" in inputs:
+            P, s = inputs["P"], inputs["S"]
+            T = brentq(
+                lambda T_: CP.PropsSI("S", "P", P, "T", T_, FLUID) - s,
+                250, 2000
+            )
 
-    if not (0 <= x <= 1):
-        raise HTTPException(400, "Quality must be between 0 and 1")
+        # h + s
+        elif "H" in inputs and "S" in inputs:
+            h, s = inputs["H"], inputs["S"]
+            T = brentq(
+                lambda T_: CP.PropsSI("H", "T", T_, "S", s, FLUID) - h,
+                250, 2000
+            )
+            P = CP.PropsSI("P", "T", T, "S", s, FLUID)
 
-    P = CP.PropsSI("P", "T", T, "Q", x, FLUID)
-    return P, T, x
+        # rho + T
+        elif "D" in inputs and "T" in inputs:
+            rho, T = inputs["D"], inputs["T"]
+            P = CP.PropsSI("P", "T", T, "D", rho, FLUID)
 
-def solve_Ph(v1, v2):
-    P = v1 if v1 > 1 else v2
-    h_target = v2 if P == v1 else v1
+        else:
+            raise ValueError("Unsupported input pair")
 
-    def f(T):
-        return CP.PropsSI("H", "P", P, "T", T, FLUID) - h_target
+        phase = detect_phase_PT(P, T)
 
-    T = brentq(f, 250, 2000)
-    return P, T
+        Q = None
+        if phase == "saturated":
+            Q = CP.PropsSI("Q", "P", P, "T", T, FLUID)
 
-def solve_Ps(v1, v2):
-    P = v1 if v1 > 1 else v2
-    s_target = v2 if P == v1 else v1
+        return {
+            "T": T,
+            "P": P,
+            "phase": phase,
+            "quality": Q,
+            "density": CP.PropsSI("D", "T", T, "P", P, FLUID),
+            "cp": CP.PropsSI("Cpmass", "T", T, "P", P, FLUID),
+            "cv": CP.PropsSI("Cvmass", "T", T, "P", P, FLUID),
+            "entropy": CP.PropsSI("Smass", "T", T, "P", P, FLUID),
+            "enthalpy": CP.PropsSI("Hmass", "T", T, "P", P, FLUID),
+            "conductivity": CP.PropsSI("L", "T", T, "P", P, FLUID),
+            "viscosity": CP.PropsSI("V", "T", T, "P", P, FLUID)
+        }
 
-    def f(T):
-        return CP.PropsSI("S", "P", P, "T", T, FLUID) - s_target
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    T = brentq(f, 250, 2000)
-    return P, T
-
-def solve_hs(h, s):
-    def equations(vars):
-        P, T = vars
-        return [
-            CP.PropsSI("H", "P", P, "T", T, FLUID) - h,
-            CP.PropsSI("S", "P", P, "T", T, FLUID) - s,
-        ]
-
-    P0, T0 = 1e5, 500
-    P, T = fsolve(equations, (P0, T0))
-    return P, T
-
-def solve_rhoT(v1, v2):
-    rho = v1 if v1 > 1 else v2
-    T = v2 if rho == v1 else v1
-
-    def f(P):
-        return CP.PropsSI("D", "P", P, "T", T, FLUID) - rho
-
-    P = brentq(f, 1e3, 1e8)
-    return P, T
-
-# =========================================================
-# Solver Dispatcher (YOUR TABLE)
-# =========================================================
-
-def dispatch_solver(n1, v1, n2, v2):
-    pair = {n1, n2}
-
-    if pair == {"P", "T"}:
-        return (*solve_PT(v1, v2), None)
-
-    if pair == {"P", "X"}:
-        P, T, x = solve_Px(v1, v2)
-        return P, T, x
-
-    if pair == {"T", "X"}:
-        P, T, x = solve_Tx(v1, v2)
-        return P, T, x
-
-    if pair == {"P", "H"}:
-        return (*solve_Ph(v1, v2), None)
-
-    if pair == {"P", "S"}:
-        return (*solve_Ps(v1, v2), None)
-
-    if pair == {"H", "S"}:
-        return (*solve_hs(v1, v2), None)
-
-    if pair == {"D", "T"}:
-        return (*solve_rhoT(v1, v2), None)
-
-    raise HTTPException(400, "Unsupported input pair")
-
-# =========================================================
-# Main Solver
-# =========================================================
-
-def solve_state(req: StateRequest):
-
-    n1 = req.input1_name.upper()
-    n2 = req.input2_name.upper()
-    v1 = req.input1_value
-    v2 = req.input2_value
-
-    P, T, quality = dispatch_solver(n1, v1, n2, v2)
-
-    phase = detect_phase_PT(P, T)
-
-    if phase == "ice" and quality is not None:
-        raise HTTPException(400, "Quality is not defined for ice")
-
-    density = prop("D", P, T)
-
-    return StateResponse(
-        P=P,
-        T=T,
-        phase=phase,
-        quality=quality,
-        density=density,
-        specific_volume=1 / density,
-        cp=prop("Cpmass", P, T),
-        cv=prop("Cvmass", P, T),
-        entropy=prop("Smass", P, T),
-        enthalpy=prop("Hmass", P, T),
-        conductivity=prop("conductivity", P, T),
-        viscosity=None if phase == "ice" else prop("viscosity", P, T),
-    )
-
-# =========================================================
-# API Route
-# =========================================================
-
+# =========================
+# API ROUTE
+# =========================
 @app.post("/water/state", response_model=StateResponse)
 def water_state(req: StateRequest):
-    return solve_state(req)
+    return solve_state(
+        req.input1_name,
+        req.input1_value,
+        req.input2_name,
+        req.input2_value
+    )
