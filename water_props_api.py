@@ -43,17 +43,30 @@ def sat_props_P(P, x):
 def sat_props_T(T, x):
     return CP.PropsSI("P", "T", T, "Q", x, FLUID)
 
+def melting_temperature(P):
+    """
+    Melting temperature of ice-water at pressure P.
+    Uses CoolProp solid-liquid equilibrium.
+    """
+    try:
+        return CP.PropsSI("T", "P", P, "phase", "solid", FLUID)
+    except:
+        return 273.15  # fallback near 1 atm
+
 def detect_phase_PT(P, T):
+    Tm = melting_temperature(P)
     Tsat = CP.PropsSI("T", "P", P, "Q", 0, FLUID)
-    if abs(T - Tsat) < 1e-3:
+
+    if T < Tm:
+        return "ice"
+    elif abs(T - Tsat) < 1e-3:
         return "saturated"
     elif T > Tsat:
         return "superheated_vapor"
     else:
         return "subcooled_liquid"
 
-def prop(prop, P, T):
-    return CP.PropsSI(prop, "P", P, "T", T, FLUID)
+
 
 # -----------------------------
 # Solver
@@ -64,6 +77,11 @@ def solve_state(req: StateRequest):
     n2, v2 = req.input2_name.upper(), req.input2_value
 
     quality = None
+    
+    # -------- Ice Safety Check --------
+    if phase == "ice" and quality is not None:
+    raise HTTPException(400, "Quality is not defined for ice")
+
 
     # -------- Saturation with Quality --------
     if {n1, n2} == {"P", "X"}:
@@ -128,7 +146,12 @@ def solve_state(req: StateRequest):
         entropy=prop("Smass", P, T),
         enthalpy=prop("Hmass", P, T),
         conductivity=prop("conductivity", P, T),
-        viscosity=prop("viscosity", P, T),
+        viscosity=(
+        prop("viscosity", P, T)
+        if phase != "ice"
+        else None
+        ),
+
     )
 
 @app.post("/water/state", response_model=StateResponse)
