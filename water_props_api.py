@@ -65,6 +65,7 @@ def solve_state(i1, v1, i2, v2):
     inputs = {i1.upper(): v1, i2.upper(): v2}
 
     try:
+        # --- Primary variable resolution ---
         if "T" in inputs and "P" in inputs:
             T, P = inputs["T"], inputs["P"]
 
@@ -84,24 +85,15 @@ def solve_state(i1, v1, i2, v2):
 
         elif "P" in inputs and "H" in inputs:
             P, h = inputs["P"], inputs["H"]
-            T = brentq(
-                lambda T_: CP.PropsSI("H", "P", P, "T", T_, FLUID) - h,
-                250, 2000
-            )
+            T = brentq(lambda T_: CP.PropsSI("H", "P", P, "T", T_, FLUID) - h, 250, 2000)
 
         elif "P" in inputs and "S" in inputs:
             P, s = inputs["P"], inputs["S"]
-            T = brentq(
-                lambda T_: CP.PropsSI("S", "P", P, "T", T_, FLUID) - s,
-                250, 2000
-            )
+            T = brentq(lambda T_: CP.PropsSI("S", "P", P, "T", T_, FLUID) - s, 250, 2000)
 
         elif "H" in inputs and "S" in inputs:
             h, s = inputs["H"], inputs["S"]
-            T = brentq(
-                lambda T_: CP.PropsSI("H", "T", T_, "S", s, FLUID) - h,
-                250, 2000
-            )
+            T = brentq(lambda T_: CP.PropsSI("H", "T", T_, "S", s, FLUID) - h, 250, 2000)
             P = CP.PropsSI("P", "T", T, "S", s, FLUID)
 
         elif "D" in inputs and "T" in inputs:
@@ -111,12 +103,15 @@ def solve_state(i1, v1, i2, v2):
         else:
             raise ValueError(f"Unsupported input pair: {i1} + {i2}")
 
+        # --- Phase detection ---
         phase = detect_phase_PT(P, T)
 
+        # --- Quality only if saturated ---
         Q = None
         if phase == "saturated":
             Q = CP.PropsSI("Q", "P", P, "T", T, FLUID)
 
+        # --- Final properties ---
         return {
             "T": T,
             "P": P,
@@ -128,7 +123,7 @@ def solve_state(i1, v1, i2, v2):
             "entropy": CP.PropsSI("Smass", "T", T, "P", P, FLUID),
             "enthalpy": CP.PropsSI("Hmass", "T", T, "P", P, FLUID),
             "conductivity": CP.PropsSI("L", "T", T, "P", P, FLUID),
-            "viscosity": CP.PropsSI("V", "T", T, "P", P, FLUID)
+            "viscosity": CP.PropsSI("V", "T", T, "P", P, FLUID),
         }
 
     except Exception as e:
