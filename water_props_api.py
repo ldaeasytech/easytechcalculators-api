@@ -12,9 +12,6 @@ app = FastAPI(
     description="Engineering-grade thermodynamic properties of water"
 )
 
-# =========================
-# CORS
-# =========================
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -26,9 +23,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
-# MODELS
-# =========================
 class StateRequest(BaseModel):
     input1_name: str
     input1_value: float
@@ -48,9 +42,6 @@ class StateResponse(BaseModel):
     conductivity: float
     viscosity: Optional[float]
 
-# =========================
-# HELPERS
-# =========================
 def melting_temperature(P):
     try:
         return CP.PropsSI("T", "P", P, "phase", "solid", FLUID)
@@ -70,18 +61,13 @@ def detect_phase_PT(P, T):
     else:
         return "subcooled_liquid"
 
-# =========================
-# SOLVER DISPATCHER
-# =========================
 def solve_state(i1, v1, i2, v2):
     inputs = {i1.upper(): v1, i2.upper(): v2}
 
     try:
-        # T + P
         if "T" in inputs and "P" in inputs:
             T, P = inputs["T"], inputs["P"]
 
-        # P + x (saturated)
         elif "P" in inputs and "X" in inputs:
             P = inputs["P"]
             x = inputs["X"]
@@ -89,7 +75,6 @@ def solve_state(i1, v1, i2, v2):
                 raise ValueError("Quality must be between 0 and 1.")
             T = CP.PropsSI("T", "P", P, "Q", 0, FLUID)
 
-        # T + x (saturated)
         elif "T" in inputs and "X" in inputs:
             T = inputs["T"]
             x = inputs["X"]
@@ -97,7 +82,6 @@ def solve_state(i1, v1, i2, v2):
                 raise ValueError("Quality must be between 0 and 1.")
             P = CP.PropsSI("P", "T", T, "Q", 0, FLUID)
 
-        # P + h
         elif "P" in inputs and "H" in inputs:
             P, h = inputs["P"], inputs["H"]
             T = brentq(
@@ -105,7 +89,6 @@ def solve_state(i1, v1, i2, v2):
                 250, 2000
             )
 
-        # P + s
         elif "P" in inputs and "S" in inputs:
             P, s = inputs["P"], inputs["S"]
             T = brentq(
@@ -113,7 +96,6 @@ def solve_state(i1, v1, i2, v2):
                 250, 2000
             )
 
-        # h + s
         elif "H" in inputs and "S" in inputs:
             h, s = inputs["H"], inputs["S"]
             T = brentq(
@@ -122,7 +104,6 @@ def solve_state(i1, v1, i2, v2):
             )
             P = CP.PropsSI("P", "T", T, "S", s, FLUID)
 
-        # rho + T
         elif "D" in inputs and "T" in inputs:
             rho, T = inputs["D"], inputs["T"]
             P = CP.PropsSI("P", "T", T, "D", rho, FLUID)
@@ -132,7 +113,6 @@ def solve_state(i1, v1, i2, v2):
 
         phase = detect_phase_PT(P, T)
 
-        # Only compute quality if saturated
         Q = None
         if phase == "saturated":
             Q = CP.PropsSI("Q", "P", P, "T", T, FLUID)
@@ -154,9 +134,6 @@ def solve_state(i1, v1, i2, v2):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# =========================
-# API ROUTE
-# =========================
 @app.post("/water/state", response_model=StateResponse)
 def water_state(req: StateRequest):
     return solve_state(
