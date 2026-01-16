@@ -58,8 +58,8 @@ def melting_temperature(P):
         return 273.15
 
 def detect_phase_PT(P, T):
-    Tm = melting_temperature(P)
     Tsat = CP.PropsSI("T", "P", P, "Q", 0, FLUID)
+    Tm = melting_temperature(P)
 
     if T < Tm:
         return "ice"
@@ -81,21 +81,21 @@ def solve_state(i1, v1, i2, v2):
         if "T" in inputs and "P" in inputs:
             T, P = inputs["T"], inputs["P"]
 
-        # P + x
+        # P + x (saturated)
         elif "P" in inputs and "X" in inputs:
             P = inputs["P"]
             x = inputs["X"]
             if not (0 <= x <= 1):
                 raise ValueError("Quality must be between 0 and 1.")
-            T = CP.PropsSI("T", "P", P, "Q", x, FLUID)
+            T = CP.PropsSI("T", "P", P, "Q", 0, FLUID)
 
-        # T + x
+        # T + x (saturated)
         elif "T" in inputs and "X" in inputs:
             T = inputs["T"]
             x = inputs["X"]
             if not (0 <= x <= 1):
                 raise ValueError("Quality must be between 0 and 1.")
-            P = CP.PropsSI("P", "T", T, "Q", x, FLUID)
+            P = CP.PropsSI("P", "T", T, "Q", 0, FLUID)
 
         # P + h
         elif "P" in inputs and "H" in inputs:
@@ -132,6 +132,7 @@ def solve_state(i1, v1, i2, v2):
 
         phase = detect_phase_PT(P, T)
 
+        # Only compute quality if saturated
         Q = None
         if phase == "saturated":
             Q = CP.PropsSI("Q", "P", P, "T", T, FLUID)
