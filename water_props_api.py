@@ -1,147 +1,161 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional
 import CoolProp.CoolProp as CP
+from scipy.optimize import brentq
 
-app = FastAPI()
+FLUID = "Water"
 
+app = FastAPI(
+    title="EasyTechCalculators – Water Properties API",
+    description="Engineering-grade thermodynamic properties of water"
+)
+
+# =========================
+# CORS (REQUIRED)
+# =========================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://easytechcalculators.com",
+        "https://www.easytechcalculators.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-FLUID = "Water"
-
+# =========================
+# MODELS
+# =========================
 class StateRequest(BaseModel):
     input1_name: str
     input1_value: float
     input2_name: str
     input2_value: float
 
+class StateResponse(BaseModel):
+    T: float
+    P: float
+    phase: str
+    quality: Optional[float]
+    density: float
+    cp: float
+    cv: float
+    entropy: float
+    enthalpy: float
+    conductivity: float
+    viscosity: Optional[float]
+
+# =========================
+# HELPERS
+# =========================
 def melting_temperature(P):
-    return CP.PropsSI("T", "P", P, "Q", 0, FLUID)
+    try:
+        return CP.PropsSI("T", "P", P, "phase", "solid", FLUID)
+    except:
+        return 273.15
 
 def detect_phase_PT(P, T):
-    Tsat = CP.PropsSI("T", "P", P, "Q", 0, FLUID)
     Tm = melting_temperature(P)
+    Tsat = CP.PropsSI("T", "P", P, "Q", 0, FLUID)
 
     if T < Tm:
         return "ice"
-    elif abs(T - Tsat) < 1e-2:
-        return "two-phase"
+    elif abs(T - Tsat) < 1e-3:
+        return "saturated"
     elif T > Tsat:
         return "superheated_vapor"
     else:
         return "subcooled_liquid"
 
-def get_all_properties(P, T, phase, quality=None):
-    props = {}
+def sat_T_from_P(P):
+    return CP.PropsSI("T", "P", P, "Q", 0, FLUID)
 
-    props["density"] = CP.PropsSI("D", "P", P, "T", T, FLUID)
-    props["specific_volume"] = 1 / props["density"]
-    props["Cp"] = CP.PropsSI("C", "P", P, "T", T, FLUID)
-    props["Cv"] = CP.PropsSI("O", "P", P, "T", T, FLUID)
-    props["entropy"] = CP.PropsSI("S", "P", P, "T", T, FLUID)
-    props["enthalpy"] = CP.PropsSI("H", "P", P, "T", T, FLUID)
-    props["thermal_conductivity"] = CP.PropsSI("L", "P", P, "T", T, FLUID)
-    props["viscosity"] = CP.PropsSI("V", "P", P, "T", T, FLUID)
-
-    if phase == "two-phase":
-        if quality is not None:
-            props["quality"] = quality
-        else:
-            # Compute quality from enthalpy (safe method)
-            hf = CP.PropsSI("H", "P", P, "Q", 0, FLUID)
-            hg = CP.PropsSI("H", "P", P, "Q", 1, FLUID)
-            props["quality"] = (props["enthalpy"] - hf) / (hg - hf)
-
-    props["phase"] = phase
-    return props
-
+# =========================
+# SOLVER DISPATCHER
+# =========================
 def solve_state(i1, v1, i2, v2):
-    i1 = i1.upper()
-    i2 = i2.upper()
     inputs = {i1: v1, i2: v2}
 
     try:
-        # -----------------------------
-        # Temperature + Quality
-        # -----------------------------
-        if "T" in inputs and "X" in inputs:
-            T = inputs["T"]
-            X = inputs["X"]
-            P = CP.PropsSI("P", "T", T, "Q", X, FLUID)
-            phase = "two-phase"
-            return get_all_properties(P, T, phase, quality=X)
-
-        # -----------------------------
-        # Pressure + Quality
-        # -----------------------------
-        if "P" in inputs and "X" in inputs:
-            P = inputs["P"]
-            X = inputs["X"]
-            T = CP.PropsSI("T", "P", P, "Q", X, FLUID)
-            phase = "two-phase"
-            return get_all_properties(P, T, phase, quality=X)
-
-        # -----------------------------
-        # Temperature + Pressure
-        # -----------------------------
+        # T + P
         if "T" in inputs and "P" in inputs:
-            T = inputs["T"]
+            T, P = inputs["T"], inputs["P"]
+
+        # P + x
+        elif "P" in inputs and "X" in inputs:
             P = inputs["P"]
-            phase = detect_phase_PT(P, T)
-            return get_all_properties(P, T, phase)
+            x = inputs["X"]
+            T = CP.PropsSI("T", "P", P, "Q", x, FLUID)
 
-        # -----------------------------
-        # Pressure + Enthalpy
-        # -----------------------------
-        if "P" in inputs and "H" in inputs:
-            P = inputs["P"]
-            H = inputs["H"]
-            T = CP.PropsSI("T", "P", P, "H", H, FLUID)
-            phase = detect_phase_PT(P, T)
-            return get_all_properties(P, T, phase)
-
-        # -----------------------------
-        # Temperature + Enthalpy
-        # -----------------------------
-        if "T" in inputs and "H" in inputs:
+        # T + x
+        elif "T" in inputs and "X" in inputs:
             T = inputs["T"]
-            H = inputs["H"]
-            P = CP.PropsSI("P", "T", T, "H", H, FLUID)
-            phase = detect_phase_PT(P, T)
-            return get_all_properties(P, T, phase)
+            x = inputs["X"]
+            P = CP.PropsSI("P", "T", T, "Q", x, FLUID)
 
-        # -----------------------------
-        # Pressure + Entropy
-        # -----------------------------
-        if "P" in inputs and "S" in inputs:
-            P = inputs["P"]
-            S = inputs["S"]
-            T = CP.PropsSI("T", "P", P, "S", S, FLUID)
-            phase = detect_phase_PT(P, T)
-            return get_all_properties(P, T, phase)
+        # P + h
+        elif "P" in inputs and "H" in inputs:
+            P, h = inputs["P"], inputs["H"]
+            T = brentq(
+                lambda T_: CP.PropsSI("H", "P", P, "T", T_, FLUID) - h,
+                250, 2000
+            )
 
-        # -----------------------------
-        # Temperature + Entropy
-        # -----------------------------
-        if "T" in inputs and "S" in inputs:
-            T = inputs["T"]
-            S = inputs["S"]
-            P = CP.PropsSI("P", "T", T, "S", S, FLUID)
-            phase = detect_phase_PT(P, T)
-            return get_all_properties(P, T, phase)
+        # P + s
+        elif "P" in inputs and "S" in inputs:
+            P, s = inputs["P"], inputs["S"]
+            T = brentq(
+                lambda T_: CP.PropsSI("S", "P", P, "T", T_, FLUID) - s,
+                250, 2000
+            )
 
-        raise ValueError("Unsupported input pair")
+        # h + s
+        elif "H" in inputs and "S" in inputs:
+            h, s = inputs["H"], inputs["S"]
+            T = brentq(
+                lambda T_: CP.PropsSI("H", "T", T_, "S", s, FLUID) - h,
+                250, 2000
+            )
+            P = CP.PropsSI("P", "T", T, "S", s, FLUID)
+
+        # rho + T
+        elif "D" in inputs and "T" in inputs:
+            rho, T = inputs["D"], inputs["T"]
+            P = CP.PropsSI("P", "T", T, "D", rho, FLUID)
+
+        else:
+            raise ValueError("Unsupported input pair")
+
+        phase = detect_phase_PT(P, T)
+
+        Q = None
+        if phase == "saturated":
+            Q = CP.PropsSI("Q", "P", P, "T", T, FLUID)
+
+        return {
+            "T": T,
+            "P": P,
+            "phase": phase,
+            "quality": Q,
+            "density": CP.PropsSI("D", "T", T, "P", P, FLUID),
+            "cp": CP.PropsSI("Cpmass", "T", T, "P", P, FLUID),
+            "cv": CP.PropsSI("Cvmass", "T", T, "P", P, FLUID),
+            "entropy": CP.PropsSI("Smass", "T", T, "P", P, FLUID),
+            "enthalpy": CP.PropsSI("Hmass", "T", T, "P", P, FLUID),
+            "conductivity": CP.PropsSI("L", "T", T, "P", P, FLUID),
+            "viscosity": CP.PropsSI("V", "T", T, "P", P, FLUID)
+        }
 
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-@app.post("/water/state")
+# =========================
+# API ROUTE
+# =========================
+@app.post("/water/state", response_model=StateResponse)
 def water_state(req: StateRequest):
     return solve_state(
         req.input1_name,
