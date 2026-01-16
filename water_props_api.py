@@ -13,7 +13,7 @@ app = FastAPI(
 )
 
 # =========================
-# CORS (REQUIRED)
+# CORS
 # =========================
 app.add_middleware(
     CORSMiddleware,
@@ -70,14 +70,11 @@ def detect_phase_PT(P, T):
     else:
         return "subcooled_liquid"
 
-def sat_T_from_P(P):
-    return CP.PropsSI("T", "P", P, "Q", 0, FLUID)
-
 # =========================
 # SOLVER DISPATCHER
 # =========================
 def solve_state(i1, v1, i2, v2):
-    inputs = {i1: v1, i2: v2}
+    inputs = {i1.upper(): v1, i2.upper(): v2}
 
     try:
         # T + P
@@ -88,12 +85,16 @@ def solve_state(i1, v1, i2, v2):
         elif "P" in inputs and "X" in inputs:
             P = inputs["P"]
             x = inputs["X"]
+            if not (0 <= x <= 1):
+                raise ValueError("Quality must be between 0 and 1.")
             T = CP.PropsSI("T", "P", P, "Q", x, FLUID)
 
         # T + x
         elif "T" in inputs and "X" in inputs:
             T = inputs["T"]
             x = inputs["X"]
+            if not (0 <= x <= 1):
+                raise ValueError("Quality must be between 0 and 1.")
             P = CP.PropsSI("P", "T", T, "Q", x, FLUID)
 
         # P + h
@@ -127,7 +128,7 @@ def solve_state(i1, v1, i2, v2):
             P = CP.PropsSI("P", "T", T, "D", rho, FLUID)
 
         else:
-            raise ValueError("Unsupported input pair")
+            raise ValueError(f"Unsupported input pair: {i1} + {i2}")
 
         phase = detect_phase_PT(P, T)
 
