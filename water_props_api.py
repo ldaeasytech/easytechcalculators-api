@@ -1,165 +1,110 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import CoolProp.CoolProp as CP
-from scipy.optimize import brentq
+
+app = Flask(__name__)
+CORS(app)
 
 FLUID = "Water"
 
-app = FastAPI(
-    title="EasyTechCalculators – Water Properties API",
-    description="Engineering-grade thermodynamic properties of water"
-)
-
-# =========================
-# CORS (REQUIRED)
-# =========================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://easytechcalculators.com",
-        "https://www.easytechcalculators.com"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# =========================
-# MODELS
-# =========================
-class StateRequest(BaseModel):
-    input1_name: str
-    input1_value: float
-    input2_name: str
-    input2_value: float
-
-class StateResponse(BaseModel):
-    T: float
-    P: float
-    phase: str
-    quality: Optional[float]
-    density: float
-    cp: float
-    cv: float
-    entropy: float
-    enthalpy: float
-    conductivity: float
-    viscosity: Optional[float]
-
-# =========================
-# HELPERS
-# =========================
-def melting_temperature(P):
+@app.route("/api/water", methods=["POST"])
+def water_api():
     try:
-        return CP.PropsSI("T", "P", P, "phase", "solid", FLUID)
-    except:
-        return 273.15
+        data = request.json
+        unit = data.get("unit", "SI")
+        pair = data.get("pair")
+        v1 = float(data.get("v1"))
+        v2 = float(data.get("v2"))
 
-def detect_phase_PT(P, T):
-    Tm = melting_temperature(P)
-    Tsat = CP.PropsSI("T", "P", P, "Q", 0, FLUID)
+        # --- Unit conversions to SI ---
+        if unit == "ENG":
+            # Temperature °F → K
+            if pair in ["PT", "Tx", "rhoT"]:
+                v1 = (v1 - 32) * 5/9 + 273.15
+            # Pressure psia → Pa
+            if pair in ["PT", "Px", "Ph", "Ps"]:
+                v1 = v1 * 6894.757
+            # Enthalpy Btu/lbm → J/kg
+            if pair in ["Ph", "hs"]:
+                v2 = v2 * 2326
+            # Entropy Btu/lbm-R → J/kg-K
+            if pair in ["Ps", "hs"]:
+                v2 = v2 * 4186.8
+            # Density lbm/ft³ → kg/m³
+            if pair == "rhoT":
+                v1 = v1 * 16.0185
 
-    if T < Tm:
-        return "ice"
-    elif abs(T - Tsat) < 1e-3:
-        return "saturated"
-    elif T > Tsat:
-        return "superheated_vapor"
-    else:
-        return "subcooled_liquid"
-
-def sat_T_from_P(P):
-    return CP.PropsSI("T", "P", P, "Q", 0, FLUID)
-
-# =========================
-# SOLVER DISPATCHER
-# =========================
-def solve_state(i1, v1, i2, v2):
-    inputs = {i1: v1, i2: v2}
-
-    try:
-        # T + P
-        if "T" in inputs and "P" in inputs:
-            T, P = inputs["T"], inputs["P"]
-
-        # P + x
-        elif "P" in inputs and "X" in inputs:
-            P = inputs["P"]
-            x = inputs["X"]
+        # --- Determine state ---
+        if pair == "PT":
+            T, P = v1, v2
+        elif pair == "Px":
+            P, x = v1, v2
             T = CP.PropsSI("T", "P", P, "Q", x, FLUID)
-
-        # T + x
-        elif "T" in inputs and "X" in inputs:
-            T = inputs["T"]
-            x = inputs["X"]
+        elif pair == "Tx":
+            T, x = v1, v2
             P = CP.PropsSI("P", "T", T, "Q", x, FLUID)
-
-        # P + h
-        elif "P" in inputs and "H" in inputs:
-            P, h = inputs["P"], inputs["H"]
-            T = brentq(
-                lambda T_: CP.PropsSI("H", "P", P, "T", T_, FLUID) - h,
-                250, 2000
-            )
-
-        # P + s
-        elif "P" in inputs and "S" in inputs:
-            P, s = inputs["P"], inputs["S"]
-            T = brentq(
-                lambda T_: CP.PropsSI("S", "P", P, "T", T_, FLUID) - s,
-                250, 2000
-            )
-
-        # h + s
-        elif "H" in inputs and "S" in inputs:
-            h, s = inputs["H"], inputs["S"]
-            T = brentq(
-                lambda T_: CP.PropsSI("H", "T", T_, "S", s, FLUID) - h,
-                250, 2000
-            )
-            P = CP.PropsSI("P", "T", T, "S", s, FLUID)
-
-        # rho + T
-        elif "D" in inputs and "T" in inputs:
-            rho, T = inputs["D"], inputs["T"]
-            P = CP.PropsSI("P", "T", T, "D", rho, FLUID)
-
+        elif pair == "Ph":
+            P, h = v1, v2 * 1000
+            T = CP.PropsSI("T", "P", P, "H", h, FLUID)
+        elif pair == "Ps":
+            P, s = v1, v2 * 1000
+            T = CP.PropsSI("T", "P", P, "S", s, FLUID)
+        elif pair == "hs":
+            h = v1 * 1000
+            s = v2 * 1000
+            T = CP.PropsSI("T", "H", h, "S", s, FLUID)
+            P = CP.PropsSI("P", "H", h, "S", s, FLUID)
+        elif pair == "rhoT":
+            rho, T = v1, v2
+            P = CP.PropsSI("P", "D", rho, "T", T, FLUID)
         else:
-            raise ValueError("Unsupported input pair")
+            return jsonify({"error": "Invalid input pair"}), 400
 
-        phase = detect_phase_PT(P, T)
-
-        Q = None
-        if phase == "saturated":
-            Q = CP.PropsSI("Q", "P", P, "T", T, FLUID)
-
-        return {
-            "T": T,
-            "P": P,
-            "phase": phase,
-            "quality": Q,
-            "density": CP.PropsSI("D", "T", T, "P", P, FLUID),
-            "cp": CP.PropsSI("Cpmass", "T", T, "P", P, FLUID),
-            "cv": CP.PropsSI("Cvmass", "T", T, "P", P, FLUID),
-            "entropy": CP.PropsSI("Smass", "T", T, "P", P, FLUID),
-            "enthalpy": CP.PropsSI("Hmass", "T", T, "P", P, FLUID),
-            "conductivity": CP.PropsSI("L", "T", T, "P", P, FLUID),
-            "viscosity": CP.PropsSI("V", "T", T, "P", P, FLUID)
+        # --- Calculate properties ---
+        results = {
+            "T": CP.PropsSI("T", "T", T, "P", P, FLUID),
+            "P": CP.PropsSI("P", "T", T, "P", P, FLUID),
+            "rho": CP.PropsSI("D", "T", T, "P", P, FLUID),
+            "v": 1 / CP.PropsSI("D", "T", T, "P", P, FLUID),
+            "h": CP.PropsSI("H", "T", T, "P", P, FLUID),
+            "s": CP.PropsSI("S", "T", T, "P", P, FLUID),
+            "cp": CP.PropsSI("C", "T", T, "P", P, FLUID),
+            "cv": CP.PropsSI("O", "T", T, "P", P, FLUID),
+            "k": CP.PropsSI("L", "T", T, "P", P, FLUID),
+            "mu": CP.PropsSI("VISCOSITY", "T", T, "P", P, FLUID)
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        # --- Convert outputs to user units ---
+        if unit == "ENG":
+            results["T"] = (results["T"] - 273.15) * 9/5 + 32
+            results["P"] = results["P"] / 6894.757
+            results["h"] = results["h"] / 2326
+            results["s"] = results["s"] / 4186.8
+            results["cp"] = results["cp"] / 4186.8
+            results["cv"] = results["cv"] / 4186.8
+            results["rho"] = results["rho"] / 16.0185
+            results["v"] = results["v"] * 16.0185
 
-# =========================
-# API ROUTE
-# =========================
-@app.post("/water/state", response_model=StateResponse)
-def water_state(req: StateRequest):
-    return solve_state(
-        req.input1_name,
-        req.input1_value,
-        req.input2_name,
-        req.input2_value
-    )
+        # --- Region detection ---
+        T_sat = CP.PropsSI("T", "P", results["P"] * (6894.757 if unit == "ENG" else 1), "Q", 0, FLUID)
+        if abs(T - T_sat) < 0.1:
+            region = "Two-Phase"
+        elif T < 273.15:
+            region = "Ice"
+        elif T > T_sat:
+            region = "Superheated Steam"
+        else:
+            region = "Subcooled Liquid"
+
+        return jsonify({
+            "success": True,
+            "region": region,
+            "results": results
+        })
+
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
