@@ -1,5 +1,4 @@
-fastapi
-uvicorn
-coolprop
-scipy
-
+flask
+flask-cors
+CoolProp
+gunicorn
